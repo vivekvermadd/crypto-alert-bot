@@ -1,4 +1,3 @@
-
 import os
 import sqlite3
 import asyncio
@@ -122,36 +121,34 @@ async def fetch_price(exchange, pair):
             elif exchange == "BITMART":
                 return float(data["data"]["tickers"][0]["last_price"])
 
-async def price_watcher(app):
-    while True:
-        con = sqlite3.connect(DB)
-        cur = con.cursor()
-        cur.execute("SELECT id,user_id,pair,exchange,condition,target,last_state FROM alerts")
-        rows = cur.fetchall()
+async def run_price_watcher(context: ContextTypes.DEFAULT_TYPE):
+    app = context.application
 
-        for aid, uid, pair, exchange, cond, target, last_state in rows:
-            try:
-                price = await fetch_price(exchange, pair)
-            except:
-                continue
+    con = sqlite3.connect(DB)
+    cur = con.cursor()
+    cur.execute("SELECT id,user_id,pair,exchange,condition,target,last_state FROM alerts")
+    rows = cur.fetchall()
 
-            now_state = "ABOVE" if price > target else "BELOW"
+    for row in rows:
+        aid, uid, pair, exchange, cond, target, last_state = row
+        try:
+            price = await fetch_price(exchange, pair)
+        except:
+            continue
 
-            if cond == "ABOVE" and last_state == "BELOW" and now_state == "ABOVE":
-                await app.bot.send_message(uid,
-                    f"🚨 PRICE ALERT\n{pair} ({exchange}) crossed ABOVE {target}\nCurrent: {price}\nTime: {datetime.now()}"
-                )
+        now_state = "ABOVE" if price > target else "BELOW"
 
-            if cond == "BELOW" and last_state == "ABOVE" and now_state == "BELOW":
-                await app.bot.send_message(uid,
-                    f"🚨 PRICE ALERT\n{pair} ({exchange}) crossed BELOW {target}\nCurrent: {price}\nTime: {datetime.now()}"
-                )
+        if cond == "ABOVE" and last_state == "BELOW" and now_state == "ABOVE":
+            await app.bot.send_message(uid, f"🚨 {pair} ({exchange}) crossed ABOVE {target}\nPrice: {price}")
 
-            cur.execute("UPDATE alerts SET last_state=? WHERE id=?", (now_state, aid))
-            con.commit()
+        if cond == "BELOW" and last_state == "ABOVE" and now_state == "BELOW":
+            await app.bot.send_message(uid, f"🚨 {pair} ({exchange}) crossed BELOW {target}\nPrice: {price}")
 
-        con.close()
-        await asyncio.sleep(CHECK_INTERVAL)
+        cur.execute("UPDATE alerts SET last_state=? WHERE id=?", (now_state, aid))
+        con.commit()
+
+    con.close()
+
 
 async def alerts_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     con = sqlite3.connect(DB)
@@ -203,8 +200,11 @@ def main():
     app.add_handler(CallbackQueryHandler(delete_alert, pattern="^DEL_"))
     app.add_handler(conv)
 
-    asyncio.create_task(price_watcher(app))
+    # START BACKGROUND PRICE CHECKER (correct way)
+    app.job_queue.run_repeating(run_price_watcher, interval=10, first=5)
+
     app.run_polling()
+
 
 if __name__ == "__main__":
     main()
