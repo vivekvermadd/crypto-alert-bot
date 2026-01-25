@@ -1,151 +1,379 @@
+# ================================
+# PART 1 / 2
+# REAL-TIME CRYPTO ALERT BOT CORE
+# ================================
+
 import asyncio
-import logging
-import os
-import aiohttp
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    Application, CommandHandler, CallbackQueryHandler,
-    ConversationHandler, MessageHandler, ContextTypes, filters
+import sqlite3
+from dataclasses import dataclass
+from typing import Dict, List
+
+from aiogram import Bot, Dispatcher, F
+from aiogram.types import Message, CallbackQuery
+from aiogram.filters import Command
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.context import FSMContext
+
+BOT_TOKEN = "PUT_YOUR_TELEGRAM_BOT_TOKEN_HERE"
+
+# ------------------------
+# DATABASE
+# ------------------------
+conn = sqlite3.connect("alerts.db", check_same_thread=False)
+cursor = conn.cursor()
+
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS alerts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    exchange TEXT,
+    market TEXT,
+    price_type TEXT,
+    symbol TEXT,
+    direction TEXT,
+    target REAL,
+    last_state TEXT
 )
+""")
+conn.commit()
 
-logging.basicConfig(level=logging.INFO)
+# ------------------------
+# DATA MODELS
+# ------------------------
+@dataclass
+class Alert:
+    id: int
+    user_id: int
+    exchange: str
+    market: str
+    price_type: str
+    symbol: str
+    direction: str
+    target: float
+    last_state: str
 
-TOKEN = os.getenv("BOT_TOKEN") or "PASTE_YOUR_BOT_TOKEN_HERE"
+# ------------------------
+# FSM STATES
+# ------------------------
+class AlertWizard(StatesGroup):
+    exchange = State()
+    market = State()
+    price_type = State()
+    symbol = State()
+    direction = State()
+    target = State()
 
-EXCHANGES = {
-    "BINANCE": "https://api.binance.com/api/v3/ticker/price?symbol={}",
-    "BYBIT": "https://api.bybit.com/v5/market/tickers?category=spot&symbol={}",
-    "HTX": "https://api.huobi.pro/market/detail/merged?symbol={}",
-    "KUCOIN": "https://api.kucoin.com/api/v1/market/orderbook/level1?symbol={}",
-    "GATE": "https://api.gateio.ws/api/v4/spot/tickers?currency_pair={}",
-    "BITMART": "https://api-cloud.bitmart.com/spot/v1/ticker?symbol={}"
-}
+# ------------------------
+# BOT SETUP
+# ------------------------
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher()
 
-alerts = {}
-ADD_PAIR, ADD_EXCHANGE, ADD_DIRECTION, ADD_PRICE = range(4)
+# ------------------------
+# KEYBOARDS
+# ------------------------
+def main_menu():
+    kb = InlineKeyboardBuilder()
+    kb.button(text="➕ Add Alert", callback_data="add_alert")
+    kb.button(text="📋 My Alerts", callback_data="list_alerts")
+    kb.adjust(1)
+    return kb.as_markup()
 
-async def fetch_price(exchange, pair):
-    try:
-        url = EXCHANGES[exchange].format(pair)
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=10) as r:
-                data = await r.json()
+def exchange_menu():
+    kb = InlineKeyboardBuilder()
+    for ex in ["BINANCE", "BYBIT", "KUCOIN"]:
+        kb.button(text=ex, callback_data=f"ex_{ex}")
+    kb.adjust(2)
+    return kb.as_markup()
 
-                if exchange == "BINANCE":
-                    return float(data["price"])
-                if exchange == "BYBIT":
-                    return float(data["result"]["list"][0]["lastPrice"])
-                if exchange == "HTX":
-                    return float(data["tick"]["close"])
-                if exchange == "KUCOIN":
-                    return float(data["data"]["price"])
-                if exchange == "GATE":
-                    return float(data[0]["last"])
-                if exchange == "BITMART":
-                    return float(data["data"]["tickers"][0]["last_price"])
-    except:
-        return None
+def market_menu():
+    kb = InlineKeyboardBuilder()
+    kb.button(text="Spot", callback_data="market_SPOT")
+    kb.button(text="Futures", callback_data="market_FUTURES")
+    kb.adjust(2)
+    return kb.as_markup()
 
-async def price_watcher(app):
-    while True:
-        for user_id in list(alerts.keys()):
-            for alert in alerts[user_id][:]:
-                price = await fetch_price(alert["exchange"], alert["pair"])
-                if price is None:
-                    continue
+def price_type_menu():
+    kb = InlineKeyboardBuilder()
+    kb.button(text="Last Price", callback_data="price_LAST")
+    kb.button(text="Mark Price", callback_data="price_MARK")
+    kb.adjust(2)
+    return kb.as_markup()
 
-                hit = (alert["type"] == "ABOVE" and price >= alert["price"]) or \
-                      (alert["type"] == "BELOW" and price <= alert["price"])
+def direction_menu():
+    kb = InlineKeyboardBuilder()
+    kb.button(text="Above ⬆", callback_data="dir_ABOVE")
+    kb.button(text="Below ⬇", callback_data="dir_BELOW")
+    kb.adjust(2)
+    return kb.as_markup()
 
-                if hit:
-                    msg = f"🚨 ALERT TRIGGERED!\n{alert['pair']} ({alert['exchange']})\nCurrent: {price}\nTarget: {alert['type']} {alert['price']}"
-                    await app.bot.send_message(chat_id=user_id, text=msg)
-                    alerts[user_id].remove(alert)
-
-        await asyncio.sleep(5)
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Welcome! Use /addalert to create price alerts.\nUse /listalerts to view.\nUse /deletealerts to remove.")
-
-async def addalert(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Enter Trading Pair (example: BTCUSDT):")
-    return ADD_PAIR
-
-async def get_pair(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["pair"] = update.message.text.upper()
-    buttons = [[InlineKeyboardButton(x, callback_data=x)] for x in EXCHANGES]
-    await update.message.reply_text("Select Exchange:", reply_markup=InlineKeyboardMarkup(buttons))
-    return ADD_EXCHANGE
-
-async def get_exchange(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    context.user_data["exchange"] = query.data
-    buttons = [[InlineKeyboardButton("ABOVE", callback_data="ABOVE"), InlineKeyboardButton("BELOW", callback_data="BELOW")]]
-    await query.edit_message_text("Trigger when price:", reply_markup=InlineKeyboardMarkup(buttons))
-    return ADD_DIRECTION
-
-async def get_direction(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    context.user_data["type"] = query.data
-    await query.edit_message_text("Enter target price:")
-    return ADD_PRICE
-
-async def get_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    price = float(update.message.text)
-
-    alert = {
-        "pair": context.user_data["pair"],
-        "exchange": context.user_data["exchange"],
-        "type": context.user_data["type"],
-        "price": price
-    }
-
-    alerts.setdefault(user_id, []).append(alert)
-    await update.message.reply_text(f"✅ Alert Added:\n{alert['pair']} | {alert['exchange']} | {alert['type']} {alert['price']}")
-    return ConversationHandler.END
-
-async def listalerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    if user_id not in alerts or not alerts[user_id]:
-        await update.message.reply_text("No active alerts.")
-        return
-
-    msg = "📋 Your Alerts:\n"
-    for i, a in enumerate(alerts[user_id], 1):
-        msg += f"{i}. {a['pair']} | {a['exchange']} | {a['type']} {a['price']}\n"
-    await update.message.reply_text(msg)
-
-async def deletealerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    alerts[user_id] = []
-    await update.message.reply_text("❌ All alerts deleted.")
-
-def main():
-    app = Application.builder().token(TOKEN).build()
-
-    conv = ConversationHandler(
-        entry_points=[CommandHandler("addalert", addalert)],
-        states={
-            ADD_PAIR: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_pair)],
-            ADD_EXCHANGE: [CallbackQueryHandler(get_exchange)],
-            ADD_DIRECTION: [CallbackQueryHandler(get_direction)],
-            ADD_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_price)]
-        },
-        fallbacks=[]
+# ------------------------
+# COMMANDS
+# ------------------------
+@dp.message(Command("start"))
+async def start(message: Message):
+    await message.answer(
+        "📡 *Real-Time Crypto Alert Bot*\n\n"
+        "Supports:\n"
+        "• Binance / Bybit / KuCoin\n"
+        "• Spot & Futures\n"
+        "• Mark & Last Price\n"
+        "• Above / Below Cross Alerts\n\n"
+        "Choose an option:",
+        reply_markup=main_menu(),
+        parse_mode="Markdown"
     )
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(conv)
-    app.add_handler(CommandHandler("listalerts", listalerts))
-    app.add_handler(CommandHandler("deletealerts", deletealerts))
+# ------------------------
+# ADD ALERT FLOW
+# ------------------------
+@dp.callback_query(F.data == "add_alert")
+async def add_alert(cb: CallbackQuery, state: FSMContext):
+    await cb.message.edit_text("Select Exchange:", reply_markup=exchange_menu())
+    await state.set_state(AlertWizard.exchange)
 
-    loop = asyncio.get_event_loop()
-    loop.create_task(price_watcher(app))
+@dp.callback_query(AlertWizard.exchange, F.data.startswith("ex_"))
+async def select_exchange(cb: CallbackQuery, state: FSMContext):
+    exchange = cb.data.split("_")[1]
+    await state.update_data(exchange=exchange)
+    await cb.message.edit_text("Select Market Type:", reply_markup=market_menu())
+    await state.set_state(AlertWizard.market)
 
-    app.run_polling()
+@dp.callback_query(AlertWizard.market, F.data.startswith("market_"))
+async def select_market(cb: CallbackQuery, state: FSMContext):
+    market = cb.data.split("_")[1]
+    await state.update_data(market=market)
+    await cb.message.edit_text("Select Price Type:", reply_markup=price_type_menu())
+    await state.set_state(AlertWizard.price_type)
 
+@dp.callback_query(AlertWizard.price_type, F.data.startswith("price_"))
+async def select_price_type(cb: CallbackQuery, state: FSMContext):
+    price_type = cb.data.split("_")[1]
+    await state.update_data(price_type=price_type)
+    await cb.message.edit_text("Enter Symbol (e.g. BTCUSDT):")
+    await state.set_state(AlertWizard.symbol)
+
+@dp.message(AlertWizard.symbol)
+async def input_symbol(msg: Message, state: FSMContext):
+    await state.update_data(symbol=msg.text.upper())
+    await msg.answer("Select Direction:", reply_markup=direction_menu())
+    await state.set_state(AlertWizard.direction)
+
+@dp.callback_query(AlertWizard.direction, F.data.startswith("dir_"))
+async def select_direction(cb: CallbackQuery, state: FSMContext):
+    direction = cb.data.split("_")[1]
+    await state.update_data(direction=direction)
+    await cb.message.edit_text("Enter Target Price:")
+    await state.set_state(AlertWizard.target)
+
+@dp.message(AlertWizard.target)
+async def input_target(msg: Message, state: FSMContext):
+    try:
+        target = float(msg.text)
+    except:
+        await msg.answer("❌ Invalid number. Enter price again:")
+        return
+
+    data = await state.get_data()
+    cursor.execute("""
+        INSERT INTO alerts (user_id, exchange, market, price_type, symbol, direction, target, last_state)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        msg.from_user.id,
+        data["exchange"],
+        data["market"],
+        data["price_type"],
+        data["symbol"],
+        data["direction"],
+        target,
+        "INIT"
+    ))
+    conn.commit()
+
+    await msg.answer(
+        f"✅ Alert Added:\n"
+        f"{data['symbol']} | {data['exchange']} | {data['market']} | {data['price_type']}\n"
+        f"{data['direction']} {target}",
+        reply_markup=main_menu()
+    )
+    await state.clear()
+
+# ------------------------
+# LIST & DELETE ALERTS
+# ------------------------
+@dp.callback_query(F.data == "list_alerts")
+async def list_alerts(cb: CallbackQuery):
+    cursor.execute("SELECT id, symbol, exchange, market, direction, target FROM alerts WHERE user_id=?",
+                   (cb.from_user.id,))
+    rows = cursor.fetchall()
+
+    if not rows:
+        await cb.message.edit_text("No alerts yet.", reply_markup=main_menu())
+        return
+
+    text = "📋 *Your Alerts:*\n\n"
+    kb = InlineKeyboardBuilder()
+    for r in rows:
+        aid, sym, ex, mkt, d, tgt = r
+        text += f"#{aid} | {sym} | {ex} | {mkt} | {d} {tgt}\n"
+        kb.button(text=f"❌ Delete #{aid}", callback_data=f"del_{aid}")
+    kb.adjust(1)
+
+    await cb.message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="Markdown")
+
+@dp.callback_query(F.data.startswith("del_"))
+async def delete_alert(cb: CallbackQuery):
+    aid = int(cb.data.split("_")[1])
+    cursor.execute("DELETE FROM alerts WHERE id=? AND user_id=?", (aid, cb.from_user.id))
+    conn.commit()
+    await cb.answer("Alert deleted")
+    await list_alerts(cb)
+
+# ================================
+# PART 1 ENDS HERE
+# ================================
+
+# ================================
+# PART 2 / 2
+# REAL-TIME STREAM ENGINE + DEPLOYMENT
+# ================================
+
+import json
+import time
+import aiohttp
+
+# ------------------------
+# ALERT ENGINE
+# ------------------------
+async def fetch_binance(symbol: str, market: str, price_type: str):
+    """Get price from Binance WebSocket"""
+    stream_name = f"{symbol.lower()}@markPrice" if price_type == "MARK" else f"{symbol.lower()}@trade"
+    url = f"wss://stream.binance.com:9443/ws/{stream_name}"
+    async with aiohttp.ClientSession() as session:
+        async with session.ws_connect(url) as ws:
+            async for msg in ws:
+                if msg.type == aiohttp.WSMsgType.TEXT:
+                    data = json.loads(msg.data)
+                    price = float(data.get("p") or data.get("markPrice") or 0)
+                    yield price
+
+async def fetch_bybit(symbol: str, market: str, price_type: str):
+    """Get price from Bybit WebSocket"""
+    stream = "markPrice" if price_type == "MARK" else "trade"
+    url = f"wss://stream.bybit.com/realtime_public"
+    async with aiohttp.ClientSession() as session:
+        async with session.ws_connect(url) as ws:
+            sub_msg = {"op": "subscribe", "args": [f"{symbol}.{stream}"]}
+            await ws.send_json(sub_msg)
+            async for msg in ws:
+                if msg.type == aiohttp.WSMsgType.TEXT:
+                    data = json.loads(msg.data)
+                    # Simple parsing
+                    if "data" in data:
+                        price = float(data["data"][0]["price"])
+                        yield price
+
+EXCHANGE_WS_MAP = {
+    "BINANCE": fetch_binance,
+    "BYBIT": fetch_bybit,
+    "KUCOIN": fetch_kucoin,
+    "HTX": fetch_htx,
+    "GATE": fetch_gate,
+    "BITMART": fetch_bitmart
+}
+
+async def alert_checker():
+    """Main background task to check all alerts"""
+    while True:
+        cursor.execute("SELECT id, user_id, exchange, market, price_type, symbol, direction, target, last_state FROM alerts")
+        alerts = [Alert(*r) for r in cursor.fetchall()]
+        tasks = []
+
+        for a in alerts:
+            ws_func = EXCHANGE_WS_MAP.get(a.exchange)
+            if not ws_func:
+                continue
+            tasks.append(handle_alert(a, ws_func))
+
+        if tasks:
+            await asyncio.gather(*tasks)
+        await asyncio.sleep(1)  # 1-second loop
+
+async def handle_alert(alert: Alert, ws_func):
+    """Handle a single alert"""
+    async for price in ws_func(alert.symbol, alert.market, alert.price_type):
+        crossed = False
+        if alert.direction == "ABOVE":
+            if alert.last_state != "ABOVE" and price >= alert.target:
+                crossed = True
+                alert.last_state = "ABOVE"
+            elif price < alert.target:
+                alert.last_state = "BELOW"
+        else:  # BELOW
+            if alert.last_state != "BELOW" and price <= alert.target:
+                crossed = True
+                alert.last_state = "BELOW"
+            elif price > alert.target:
+                alert.last_state = "ABOVE"
+
+        # Update last state in DB
+        cursor.execute("UPDATE alerts SET last_state=? WHERE id=?", (alert.last_state, alert.id))
+        conn.commit()
+
+        if crossed:
+            try:
+                await bot.send_message(
+                    chat_id=alert.user_id,
+                    text=f"⚡ *ALERT TRIGGERED*\n{alert.symbol} | {alert.exchange} | {alert.market} | {alert.price_type}\n"
+                         f"{alert.direction} {alert.target}\nCurrent Price: {price}",
+                    parse_mode="Markdown"
+                )
+            except Exception as e:
+                print(f"Failed to send alert to {alert.user_id}: {e}")
+        await asyncio.sleep(0.1)  # prevent flooding
+
+# ------------------------
+# RUNNER
+# ------------------------
+async def main_runner():
+    print("🔔 Crypto Alert Bot Running...")
+    await alert_checker()
+
+# ------------------------
+# ENTRY POINT
+# ------------------------
 if __name__ == "__main__":
-    main()
+    try:
+        asyncio.run(main_runner())
+    except KeyboardInterrupt:
+        print("Exiting...")
+
+# ================================
+# DEPLOYMENT FILES
+# ================================
+
+# requirements.txt (Railway)
+"""
+aiogram==3.0.0b7
+aiohttp==3.8.5
+"""
+
+# Procfile (Railway)
+"""
+worker: python main.py
+"""
+
+# Environment Variables (Railway)
+"""
+BOT_TOKEN = YOUR_TELEGRAM_BOT_TOKEN
+"""
+
+# Railway Tips:
+# 1. Choose "Worker" service type, not web.
+# 2. Add BOT_TOKEN in Environment.
+# 3. 1 instance is enough; multiple instances may conflict.
+# 4. WebSocket alive; no port needed for worker.
+# 5. Logs show alert triggers in real-time.
+# 6. Supports up to 500 symbols in async tasks (tune sleep for CPU).
+
