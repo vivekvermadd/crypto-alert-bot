@@ -1,7 +1,7 @@
 # ================================
-# TELEGRAM CRYPTO ALERT BOT - FULL VERSION
-# Multi-Exchange: Binance, Bybit, KuCoin, HTX, Gate.io, BitMart
-# Async, WebSocket, Real-Time, Above/Below Alerts
+# TELEGRAM CRYPTO ALERT BOT - FINAL SPOT VERSION
+# Exchanges: Binance, Bybit, KuCoin, HTX, Gate.io, BitMart
+# Fully live WebSocket feeds, alerts on EVERY CROSS
 # ================================
 
 import asyncio
@@ -13,11 +13,11 @@ from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
     ContextTypes,
-    ConversationHandler,
-    CallbackQueryHandler,
 )
 import aiohttp
 import os
+import zlib
+import base64
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
@@ -31,8 +31,6 @@ CREATE TABLE IF NOT EXISTS alerts(
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER,
     exchange TEXT,
-    market TEXT,
-    price_type TEXT,
     symbol TEXT,
     direction TEXT,
     target REAL,
@@ -46,8 +44,6 @@ class Alert:
     id: int
     user_id: int
     exchange: str
-    market: str
-    price_type: str
     symbol: str
     direction: str
     target: float
@@ -59,19 +55,17 @@ class Alert:
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Welcome to Crypto Alert Bot!\n"
-        "Use /add to create alert, /view to see alerts, /delete to remove."
+        "Use /add to create alert, /view to see alerts, /delete to remove.\n\n"
+        "Example to add:\n/add BINANCE BTCUSDT ABOVE 50000"
     )
 
 async def add_alert(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Minimal demo: parse from command
-    # Example: /add BINANCE BTCUSDT ABOVE 45000
     try:
         _, exchange, symbol, direction, target = update.message.text.split()
         target = float(target)
         cursor.execute(
-            "INSERT INTO alerts(user_id, exchange, market, price_type, symbol, direction, target, last_state) "
-            "VALUES(?,?,?,?,?,?,?,?)",
-            (update.message.chat_id, exchange.upper(), "SPOT", "LAST", symbol.upper(), direction.upper(), target, "UNKNOWN")
+            "INSERT INTO alerts(user_id, exchange, symbol, direction, target, last_state) VALUES(?,?,?,?,?,?)",
+            (update.message.chat_id, exchange.upper(), symbol.upper(), direction.upper(), target, "UNKNOWN")
         )
         conn.commit()
         await update.message.reply_text(f"✅ Alert Added:\n{symbol} | {exchange.upper()} | {direction.upper()} {target}")
@@ -97,68 +91,99 @@ async def delete_alert(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Error: {e}\nUsage: /delete ALERT_ID")
 
 # ================================
-# EXCHANGE WEBSOCKET FUNCTIONS
+# EXCHANGE WEBSOCKET FUNCTIONS (SPOT)
 # ================================
 
 # ------------------- BINANCE -------------------
-async def fetch_binance(symbol: str, market: str, price_type: str):
-    stream_name = f"{symbol.lower()}@trade"
-    if price_type.upper() == "MARK":
-        stream_name = f"{symbol.lower()}@markPrice"
-    url = f"wss://stream.binance.com:9443/ws/{stream_name}"
+async def fetch_binance(symbol: str):
+    url = f"wss://stream.binance.com:9443/ws/{symbol.lower()}@trade"
     async with aiohttp.ClientSession() as session:
         async with session.ws_connect(url) as ws:
             async for msg in ws:
                 if msg.type == aiohttp.WSMsgType.TEXT:
                     data = json.loads(msg.data)
-                    price = float(data.get("p") or data.get("markPrice") or 0)
-                    yield price
+                    yield float(data["p"])
 
 # ------------------- BYBIT -------------------
-async def fetch_bybit(symbol: str, market: str, price_type: str):
-    stream = "trade" if price_type.upper() == "LAST" else "markPrice"
+async def fetch_bybit(symbol: str):
     url = "wss://stream.bybit.com/realtime_public"
     async with aiohttp.ClientSession() as session:
         async with session.ws_connect(url) as ws:
-            await ws.send_json({"op":"subscribe","args":[f"{symbol}.{stream}"]})
+            await ws.send_json({"op":"subscribe","args":[f"{symbol}.trade"]})
             async for msg in ws:
                 if msg.type == aiohttp.WSMsgType.TEXT:
                     data = json.loads(msg.data)
                     if "data" in data:
-                        price = float(data["data"][0]["price"])
-                        yield price
+                        yield float(data["data"][0]["price"])
 
 # ------------------- KUCOIN -------------------
-async def fetch_kucoin(symbol: str, market: str, price_type: str):
-    url = "wss://ws-api.kucoin.com/endpoint?token=PUBLIC"
-    # For simplicity, placeholder
-    while True:
-        # In production, implement KuCoin WS properly
-        await asyncio.sleep(1)
-        yield 0.0  # Replace with real price
+async def fetch_kucoin(symbol: str):
+    async with aiohttp.ClientSession() as session:
+        # Step 1: Get token
+        async with session.post("https://api.kucoin.com/api/v1/bullet-public") as r:
+            resp = await r.json()
+            endpoint = resp["data"]["instanceServers"][0]["endpoint"]
+            token = resp["data"]["token"]
+        url = f"{endpoint}?token={token}"
+        async with session.ws_connect(url) as ws:
+            await ws.send_json({"id":1,"type":"subscribe","topic":f"/market/ticker:{symbol}","response":True})
+            async for msg in ws:
+                if msg.type == aiohttp.WSMsgType.TEXT:
+                    data = json.loads(msg.data)
+                    if "data" in data and "price" in data["data"]:
+                        yield float(data["data"]["price"])
 
-# ------------------- HTX -------------------
-async def fetch_htx(symbol: str, market: str, price_type: str):
-    url = f"wss://api.hadax.com/ws/{symbol.lower()}"
-    while True:
-        await asyncio.sleep(1)
-        yield 0.0  # Replace with real price
+# ------------------- HTX (Huobi Spot) -------------------
+async def fetch_htx(symbol: str):
+    url = "wss://api.huobi.pro/ws"
+    async with aiohttp.ClientSession() as session:
+        async with session.ws_connect(url) as ws:
+            # Subscribe to ticker
+            await ws.send_json({
+                "sub": f"market.{symbol.lower()}.ticker",
+                "id": "id1"
+            })
+            async for msg in ws:
+                if msg.type == aiohttp.WSMsgType.TEXT:
+                    raw = msg.data
+                    # Huobi sends compressed message
+                    decompressed = zlib.decompress(raw, 16+zlib.MAX_WBITS)
+                    data = json.loads(decompressed)
+                    if "tick" in data:
+                        yield float(data["tick"]["close"])
 
 # ------------------- GATE.IO -------------------
-async def fetch_gate(symbol: str, market: str, price_type: str):
-    url = f"wss://api.gateio.ws/ws/v4/"
-    while True:
-        await asyncio.sleep(1)
-        yield 0.0  # Replace with real price
+async def fetch_gate(symbol: str):
+    url = "wss://api.gateio.ws/ws/v4/"
+    async with aiohttp.ClientSession() as session:
+        async with session.ws_connect(url) as ws:
+            await ws.send_json({
+                "time": 0,
+                "channel": "spot.tickers",
+                "event": "subscribe",
+                "payload": [symbol.upper()]
+            })
+            async for msg in ws:
+                if msg.type == aiohttp.WSMsgType.TEXT:
+                    data = json.loads(msg.data)
+                    if "result" in data and isinstance(data["result"], list):
+                        for r in data["result"]:
+                            if r["currency_pair"].upper() == symbol.upper():
+                                yield float(r["last"])
 
 # ------------------- BITMART -------------------
-async def fetch_bitmart(symbol: str, market: str, price_type: str):
-    url = f"wss://ws-manager-compress.bitmart.com/api?symbol={symbol.lower()}"
-    while True:
-        await asyncio.sleep(1)
-        yield 0.0  # Replace with real price
+async def fetch_bitmart(symbol: str):
+    url = f"wss://ws-manager-compress.bitmart.com/api?protocol=1.1"
+    async with aiohttp.ClientSession() as session:
+        async with session.ws_connect(url) as ws:
+            await ws.send_json({"op":"subscribe","args":[f"spot/ticker:{symbol}"]})
+            async for msg in ws:
+                if msg.type == aiohttp.WSMsgType.TEXT:
+                    data = json.loads(msg.data)
+                    if "data" in data and "last_price" in data["data"]:
+                        yield float(data["data"]["last_price"])
 
-# ------------------- EXCHANGE MAPPING -------------------
+# ------------------- EXCHANGE MAP -------------------
 EXCHANGE_WS_MAP = {
     "BINANCE": fetch_binance,
     "BYBIT": fetch_bybit,
@@ -172,7 +197,7 @@ EXCHANGE_WS_MAP = {
 # ALERT ENGINE
 # ================================
 async def handle_alert(alert: Alert, ws_func):
-    async for price in ws_func(alert.symbol, alert.market, alert.price_type):
+    async for price in ws_func(alert.symbol):
         crossed = False
         if alert.direction == "ABOVE":
             if alert.last_state != "ABOVE" and price >= alert.target:
@@ -206,12 +231,11 @@ async def alert_checker():
         tasks = []
         for a in alerts:
             ws_func = EXCHANGE_WS_MAP.get(a.exchange)
-            if not ws_func:
-                continue
-            tasks.append(handle_alert(a, ws_func))
+            if ws_func:
+                tasks.append(handle_alert(a, ws_func))
         if tasks:
             await asyncio.gather(*tasks)
-        await asyncio.sleep(1)  # loop every second
+        await asyncio.sleep(1)
 
 # ================================
 # RUNNER
@@ -219,14 +243,12 @@ async def alert_checker():
 async def main_runner():
     global bot
     bot = ApplicationBuilder().token(BOT_TOKEN).build()
-
     bot.add_handler(CommandHandler("start", start))
     bot.add_handler(CommandHandler("add", add_alert))
     bot.add_handler(CommandHandler("view", view_alerts))
     bot.add_handler(CommandHandler("delete", delete_alert))
 
     asyncio.create_task(alert_checker())
-
     await bot.run_polling()
 
 # ================================
