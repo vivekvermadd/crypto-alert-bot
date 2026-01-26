@@ -16,7 +16,7 @@ from telegram.ext import (
     ConversationHandler, ContextTypes, MessageHandler, filters
 )
 
-TOKEN = "YOUR_TELEGRAM_BOT_TOKEN_HERE"
+TOKEN = "8531399639:AAECibyuLpAgjo7vt95byOway_PcxIWUaYg"
 
 logging.basicConfig(level=logging.INFO)
 
@@ -201,3 +201,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
