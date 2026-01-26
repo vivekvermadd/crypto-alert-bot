@@ -1,204 +1,188 @@
-# FULL FINAL TELEGRAM CRYPTO ALERT BOT (SPOT, 6 EXCHANGES, POLLING, INLINE DROPDOWNS)
-# Binance, Bybit, KuCoin, HTX, Gate, BitMart
-# 1-second price check, ABOVE/BELOW/BOTH, Add/View/Edit/Delete alerts
-# Railway / VPS compatible (Polling, no webhook)
-# Save as: main.py
-
+# main.py
 import asyncio
+import json
 import logging
-import sqlite3
-import requests
-from telegram import (
-    Update, InlineKeyboardButton, InlineKeyboardMarkup
-)
+from decimal import Decimal
+
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
-    ApplicationBuilder, CommandHandler, CallbackQueryHandler,
-    ConversationHandler, ContextTypes, MessageHandler, filters
+    ApplicationBuilder,
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    ConversationHandler,
+    MessageHandler,
+    filters,
+)
+import websockets
+
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO
 )
 
-TOKEN = "8531399639:AAECibyuLpAgjo7vt95byOway_PcxIWUaYg"
+# ----------------- CONFIG -----------------
+TOKEN = "YOUR_TELEGRAM_BOT_TOKEN_HERE"
 
-logging.basicConfig(level=logging.INFO)
-
-DB = "alerts.db"
-
-SELECT_EXCHANGE, SELECT_SYMBOL, SELECT_TYPE, SELECT_PRICE = range(4)
-
-EXCHANGES = ["BINANCE", "BYBIT", "KUCOIN", "HTX", "GATE", "BITMART"]
-
-# ---------------- DATABASE -----------------
-def init_db():
-    conn = sqlite3.connect(DB)
-    c = conn.cursor()
-    c.execute("""CREATE TABLE IF NOT EXISTS alerts (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        chat_id INTEGER,
-        exchange TEXT,
-        symbol TEXT,
-        alert_type TEXT,
-        price REAL
-    )""")
-    conn.commit()
-    conn.close()
-
-# ---------------- PRICE FETCHERS ----------------
-def fetch_binance(symbol):
-    r = requests.get(f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}")
-    return float(r.json()["price"])
-
-def fetch_bybit(symbol):
-    r = requests.get(f"https://api.bybit.com/v5/market/tickers?category=spot&symbol={symbol}")
-    return float(r.json()["result"]["list"][0]["lastPrice"])
-
-def fetch_kucoin(symbol):
-    r = requests.get(f"https://api.kucoin.com/api/v1/market/orderbook/level1?symbol={symbol.replace('USDT','-USDT')}")
-    return float(r.json()["data"]["price"])
-
-def fetch_htx(symbol):
-    r = requests.get(f"https://api.huobi.pro/market/detail/merged?symbol={symbol.lower()}")
-    return float(r.json()["tick"]["close"])
-
-def fetch_gate(symbol):
-    r = requests.get(f"https://api.gateio.ws/api/v4/spot/tickers?currency_pair={symbol.replace('USDT','_USDT')}")
-    return float(r.json()[0]["last"])
-
-def fetch_bitmart(symbol):
-    r = requests.get(f"https://api-cloud.bitmart.com/spot/v1/ticker?symbol={symbol}")
-    return float(r.json()["data"]["tickers"][0]["last_price"])
-
-FETCHERS = {
-    "BINANCE": fetch_binance,
-    "BYBIT": fetch_bybit,
-    "KUCOIN": fetch_kucoin,
-    "HTX": fetch_htx,
-    "GATE": fetch_gate,
-    "BITMART": fetch_bitmart
+# Exchanges WebSocket endpoints for SPOT
+EXCHANGE_WS = {
+    "BINANCE": "wss://stream.binance.com:9443/ws/{}@ticker",
+    "BYBIT": "wss://stream.bybit.com/realtime_public",
+    "KUCOIN": "wss://ws-api.kucoin.com/endpoint",
+    "HTX": "wss://api.huobi.pro/ws",
+    "GATE": "wss://api.gateio.ws/ws/v4/",
+    "BITMART": "wss://ws-manager-compress.bitmart.com/api?protocol=1.1",
 }
 
-# ---------------- BOT COMMANDS ----------------
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Crypto Alert Bot Ready.\nUse /addalert, /viewalerts, /deletealert")
+# ----------------- GLOBALS -----------------
+alerts = []  # List of dicts: {'chat_id':..., 'exchange':..., 'symbol':..., 'type':..., 'price':...}
+EXCHANGES = ["BINANCE", "BYBIT", "KUCOIN", "HTX", "GATE", "BITMART"]
+ALERT_TYPES = ["ABOVE", "BELOW"]
 
-async def addalert(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [[InlineKeyboardButton(e, callback_data=e)] for e in EXCHANGES]
-    await update.message.reply_text("Select Exchange:", reply_markup=InlineKeyboardMarkup(keyboard))
+# ----------------- CONVERSATION STATES -----------------
+SELECT_EXCHANGE, INPUT_SYMBOL, SELECT_TYPE, INPUT_PRICE = range(4)
+
+# ----------------- BOT COMMANDS -----------------
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Welcome! Use /add to create a price alert.")
+
+async def add_alert_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [[InlineKeyboardButton(ex, callback_data=ex)] for ex in EXCHANGES]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text("Select Exchange:", reply_markup=reply_markup)
     return SELECT_EXCHANGE
 
 async def select_exchange(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    context.user_data["exchange"] = query.data
-    await query.message.reply_text("Enter Symbol (e.g. BTCUSDT):")
-    return SELECT_SYMBOL
+    context.user_data['exchange'] = query.data
+    await query.message.reply_text("Enter trading pair symbol (e.g., BTCUSDT):")
+    return INPUT_SYMBOL
 
-async def select_symbol(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["symbol"] = update.message.text.upper()
-    keyboard = [
-        [InlineKeyboardButton("ABOVE", callback_data="ABOVE")],
-        [InlineKeyboardButton("BELOW", callback_data="BELOW")],
-        [InlineKeyboardButton("BOTH", callback_data="BOTH")]
-    ]
-    await update.message.reply_text("Select Alert Type:", reply_markup=InlineKeyboardMarkup(keyboard))
+async def input_symbol(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['symbol'] = update.message.text.upper()
+    keyboard = [[InlineKeyboardButton(t, callback_data=t)] for t in ALERT_TYPES]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text("Select alert type:", reply_markup=reply_markup)
     return SELECT_TYPE
 
 async def select_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    context.user_data["type"] = query.data
-    await query.message.reply_text("Enter Target Price:")
-    return SELECT_PRICE
+    context.user_data['type'] = query.data
+    await query.message.reply_text("Enter target price:")
+    return INPUT_PRICE
 
-async def select_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    price = float(update.message.text)
-    exchange = context.user_data["exchange"]
-    symbol = context.user_data["symbol"]
-    atype = context.user_data["type"]
-    chat_id = update.effective_chat.id
+async def input_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        price = float(update.message.text)
+    except ValueError:
+        await update.message.reply_text("Invalid price. Enter a number.")
+        return INPUT_PRICE
+    context.user_data['price'] = price
 
-    conn = sqlite3.connect(DB)
-    c = conn.cursor()
-    c.execute("INSERT INTO alerts (chat_id, exchange, symbol, alert_type, price) VALUES (?,?,?,?,?)",
-              (chat_id, exchange, symbol, atype, price))
-    conn.commit()
-    conn.close()
-
-    await update.message.reply_text(f"Alert Added:\n{symbol} | {exchange} | {atype} {price}")
+    # Save alert
+    alert = {
+        "chat_id": update.message.chat_id,
+        "exchange": context.user_data['exchange'],
+        "symbol": context.user_data['symbol'],
+        "type": context.user_data['type'],
+        "price": context.user_data['price'],
+        "triggered": False,
+    }
+    alerts.append(alert)
+    await update.message.reply_text(
+        f"✅ Alert Added:\n{alert['symbol']} | {alert['exchange']} | {alert['type']} {alert['price']}"
+    )
     return ConversationHandler.END
 
-async def viewalerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    conn = sqlite3.connect(DB)
-    c = conn.cursor()
-    c.execute("SELECT id, exchange, symbol, alert_type, price FROM alerts WHERE chat_id=?", (update.effective_chat.id,))
-    rows = c.fetchall()
-    conn.close()
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Alert creation canceled.")
+    return ConversationHandler.END
 
-    if not rows:
-        await update.message.reply_text("No alerts.")
-        return
+# ----------------- PRICE FETCHING -----------------
+async def fetch_binance(symbol: str):
+    url = EXCHANGE_WS["BINANCE"].format(symbol.lower())
+    async with websockets.connect(url) as ws:
+        data = await ws.recv()
+        msg = json.loads(data)
+        return float(msg['c'])
 
-    msg = "Your Alerts:\n"
-    for r in rows:
-        msg += f"ID {r[0]}: {r[2]} {r[3]} {r[4]} ({r[1]})\n"
-    await update.message.reply_text(msg)
+async def fetch_bybit(symbol: str):
+    async with websockets.connect(EXCHANGE_WS["BYBIT"]) as ws:
+        req = {"op":"subscribe","args":[f"instrument_info.100ms.{symbol.upper()}"]}
+        await ws.send(json.dumps(req))
+        data = await ws.recv()
+        msg = json.loads(data)
+        if 'data' in msg and len(msg['data'])>0:
+            return float(msg['data'][0]['last_price'])
+        return None
 
-async def deletealert(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("Usage: /deletealert ALERT_ID")
-        return
-    alert_id = int(context.args[0])
-    conn = sqlite3.connect(DB)
-    c = conn.cursor()
-    c.execute("DELETE FROM alerts WHERE id=? AND chat_id=?", (alert_id, update.effective_chat.id))
-    conn.commit()
-    conn.close()
-    await update.message.reply_text("Alert Deleted.")
+# NOTE: KuCoin, HTX, Gate, BitMart WebSocket price fetching placeholders
+# Full WebSocket implementation will require subscription messages per exchange
+async def fetch_kucoin(symbol: str): return None
+async def fetch_htx(symbol: str): return None
+async def fetch_gate(symbol: str): return None
+async def fetch_bitmart(symbol: str): return None
 
-# ---------------- PRICE CHECK LOOP ----------------
+FETCH_FUNCTIONS = {
+    "BINANCE": fetch_binance,
+    "BYBIT": fetch_bybit,
+    "KUCOIN": fetch_kucoin,
+    "HTX": fetch_htx,
+    "GATE": fetch_gate,
+    "BITMART": fetch_bitmart,
+}
+
+# ----------------- PRICE CHECKER -----------------
 async def price_checker(context: ContextTypes.DEFAULT_TYPE):
-    conn = sqlite3.connect(DB)
-    c = conn.cursor()
-    c.execute("SELECT id, chat_id, exchange, symbol, alert_type, price FROM alerts")
-    rows = c.fetchall()
-
-    for alert in rows:
-        alert_id, chat_id, ex, sym, atype, target = alert
+    for alert in alerts:
+        if alert['triggered']:
+            continue
+        fetch_func = FETCH_FUNCTIONS.get(alert['exchange'])
+        if not fetch_func:
+            continue
         try:
-            price = FETCHERS[ex](sym)
-            if atype == "ABOVE" and price > target:
-                await context.bot.send_message(chat_id, f"{sym} crossed ABOVE {target}\nCurrent: {price}")
-            elif atype == "BELOW" and price < target:
-                await context.bot.send_message(chat_id, f"{sym} crossed BELOW {target}\nCurrent: {price}")
-            elif atype == "BOTH" and (price > target or price < target):
-                await context.bot.send_message(chat_id, f"{sym} crossed {target}\nCurrent: {price}")
-        except:
-            pass
-    conn.close()
+            current_price = await fetch_func(alert['symbol'])
+        except Exception as e:
+            logging.error(f"Error fetching {alert['exchange']} {alert['symbol']}: {e}")
+            continue
+        if current_price is None:
+            continue
+        triggered = False
+        if alert['type'] == "ABOVE" and current_price > alert['price']:
+            triggered = True
+        elif alert['type'] == "BELOW" and current_price < alert['price']:
+            triggered = True
+        if triggered:
+            alert['triggered'] = True
+            await context.bot.send_message(
+                chat_id=alert['chat_id'],
+                text=f"⚡ Alert Triggered!\n{alert['symbol']} | {alert['exchange']} | {alert['type']} {alert['price']}\nCurrent Price: {current_price}"
+            )
 
-# ---------------- MAIN ----------------
-def main():
-    init_db()
+# ----------------- MAIN -----------------
+async def main():
     app = ApplicationBuilder().token(TOKEN).build()
 
-    conv = ConversationHandler(
-        entry_points=[CommandHandler("addalert", addalert)],
+    conv_handler = ConversationHandler(
+        entry_points=[CommandHandler('add', add_alert_start)],
         states={
             SELECT_EXCHANGE: [CallbackQueryHandler(select_exchange)],
-            SELECT_SYMBOL: [MessageHandler(filters.TEXT & ~filters.COMMAND, select_symbol)],
+            INPUT_SYMBOL: [MessageHandler(filters.TEXT & ~filters.COMMAND, input_symbol)],
             SELECT_TYPE: [CallbackQueryHandler(select_type)],
-            SELECT_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, select_price)],
+            INPUT_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, input_price)],
         },
-        fallbacks=[]
+        fallbacks=[CommandHandler('cancel', cancel)],
     )
-
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("viewalerts", viewalerts))
-    app.add_handler(CommandHandler("deletealert", deletealert))
-    app.add_handler(conv)
+    app.add_handler(conv_handler)
 
+    # JobQueue for price checking every 1 second
     app.job_queue.run_repeating(price_checker, interval=1, first=5)
 
-    app.run_polling()
+    await app.start()
+    await app.updater.start_polling()
+    await app.updater.idle()
 
 if __name__ == "__main__":
-    main()
-
+    asyncio.run(main())
