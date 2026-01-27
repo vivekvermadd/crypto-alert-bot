@@ -1,200 +1,187 @@
 # main.py
-# Production-ready Telegram WebSocket Price Alert Bot (6 Exchanges, Inline UI)
-# Exchanges: Binance, KuCoin, Bybit, HTX, Gate, BitMart
-# Requirements:
-# pip install python-telegram-bot==20.8 websockets aiohttp
+# Telegram Crypto Price Alert Bot (WebSocket, 6 Exchanges, Inline Menu, No extra libs)
+# Uses only: python-telegram-bot, aiohttp (already available on most clouds)
 
 import asyncio
 import json
 import os
-import websockets
 import aiohttp
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    CallbackQueryHandler,
-    MessageHandler,
-    ContextTypes,
-    filters,
-)
+from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, ContextTypes, filters
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN") or "PUT_YOUR_TELEGRAM_BOT_TOKEN_HERE"
+BOT_TOKEN = os.environ.get("BOT_TOKEN") or "PUT_YOUR_BOT_TOKEN_HERE"
 
-EXCHANGES = ["Binance", "KuCoin", "Bybit", "HTX", "Gate", "BitMart"]
-user_states = {}
-alerts = {}  # user_id -> list of alerts
+EXCHANGES = ["BINANCE", "KUCOIN", "BYBIT", "HTX", "GATE", "BITMART"]
+user_state = {}
+alerts = {}
 
-# -------------------- TELEGRAM UI --------------------
+# ---------------- UI ----------------
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    kb = [[InlineKeyboardButton(ex, callback_data=f"ex_{ex}")] for ex in EXCHANGES]
-    await update.message.reply_text("Select Exchange:", reply_markup=InlineKeyboardMarkup(kb))
+    keyboard = [[InlineKeyboardButton(e, callback_data=f"EX_{e}")] for e in EXCHANGES]
+    await update.message.reply_text("Select Exchange:", reply_markup=InlineKeyboardMarkup(keyboard))
 
-async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user_id = query.from_user.id
-    data = query.data
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
+    data = q.data
 
-    if data.startswith("ex_"):
-        ex = data.split("_")[1]
-        user_states[user_id] = {"exchange": ex}
-        await query.edit_message_text("Send trading pair (e.g. BTCUSDT):")
+    if data.startswith("EX_"):
+        user_state[uid] = {"exchange": data.replace("EX_", "")}
+        await q.edit_message_text("Send Symbol (e.g. BTCUSDT):")
 
     elif data in ["ABOVE", "BELOW"]:
-        user_states[user_id]["condition"] = data
-        await query.edit_message_text("Enter trigger price:")
+        user_state[uid]["condition"] = data
+        await q.edit_message_text("Enter Trigger Price:")
 
-    elif data.startswith("del_"):
+    elif data.startswith("DEL_"):
         idx = int(data.split("_")[1])
-        alerts[user_id].pop(idx)
-        await query.edit_message_text("Alert removed.")
+        alerts[uid].pop(idx)
+        await q.edit_message_text("Alert Deleted.")
         await list_alerts(update, context)
 
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    text = update.message.text.strip().upper()
+    uid = update.message.from_user.id
+    text = update.message.text.upper().strip()
 
-    if user_id not in user_states:
+    if uid not in user_state:
         return
 
-    state = user_states[user_id]
+    st = user_state[uid]
 
-    if "symbol" not in state:
-        state["symbol"] = text
+    if "symbol" not in st:
+        st["symbol"] = text
         kb = [
             [InlineKeyboardButton("Price Above", callback_data="ABOVE")],
             [InlineKeyboardButton("Price Below", callback_data="BELOW")]
         ]
-        await update.message.reply_text("Condition:", reply_markup=InlineKeyboardMarkup(kb))
-    elif "price" not in state:
+        await update.message.reply_text("Select Condition:", reply_markup=InlineKeyboardMarkup(kb))
+        return
+
+    if "price" not in st:
         try:
-            price = float(text)
-            state["price"] = price
-            alerts.setdefault(user_id, []).append(state.copy())
-            user_states.pop(user_id)
-            await update.message.reply_text("Alert added successfully.")
+            st["price"] = float(text)
+            alerts.setdefault(uid, []).append(st.copy())
+            user_state.pop(uid)
+            await update.message.reply_text("Alert Added.")
             await list_alerts(update, context)
         except:
-            await update.message.reply_text("Invalid price. Enter number.")
+            await update.message.reply_text("Enter valid number.")
 
 async def list_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if user_id not in alerts or not alerts[user_id]:
+    uid = update.effective_user.id
+    if uid not in alerts or not alerts[uid]:
         await update.message.reply_text("No active alerts.")
         return
 
-    text = "Your Alerts:\n"
+    txt = "Active Alerts:\n"
     kb = []
-    for i, a in enumerate(alerts[user_id]):
-        text += f"{i+1}) {a['exchange']} {a['symbol']} {a['condition']} {a['price']}\n"
-        kb.append([InlineKeyboardButton(f"Delete {i+1}", callback_data=f"del_{i}")])
+    for i, a in enumerate(alerts[uid]):
+        txt += f"{i+1}. {a['exchange']} {a['symbol']} {a['condition']} {a['price']}\n"
+        kb.append([InlineKeyboardButton(f"Delete {i+1}", callback_data=f"DEL_{i}")])
 
-    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(kb))
+    await update.message.reply_text(txt, reply_markup=InlineKeyboardMarkup(kb))
 
-# -------------------- WEBSOCKET PRICE FEEDS --------------------
+# ---------------- PRICE STREAMS ----------------
 
 async def binance_ws():
-    uri = "wss://stream.binance.com:9443/ws/!ticker@arr"
-    async with websockets.connect(uri) as ws:
-        while True:
-            data = json.loads(await ws.recv())
-            for t in data:
-                yield "Binance", t["s"], float(t["c"])
+    url = "wss://stream.binance.com:9443/ws/!ticker@arr"
+    async with aiohttp.ClientSession() as session:
+        async with session.ws_connect(url) as ws:
+            async for msg in ws:
+                data = json.loads(msg.data)
+                for t in data:
+                    yield "BINANCE", t["s"], float(t["c"])
+
+async def bybit_ws():
+    url = "wss://stream.bybit.com/v5/public/spot"
+    async with aiohttp.ClientSession() as session:
+        async with session.ws_connect(url) as ws:
+            await ws.send_json({"op": "subscribe", "args": ["tickers"]})
+            async for msg in ws:
+                d = json.loads(msg.data)
+                if "data" in d:
+                    for t in d["data"]:
+                        yield "BYBIT", t["symbol"], float(t["lastPrice"])
 
 async def kucoin_ws():
     async with aiohttp.ClientSession() as s:
         async with s.post("https://api.kucoin.com/api/v1/bullet-public") as r:
             token = (await r.json())["data"]["token"]
-            ws_url = f"wss://ws-api.kucoin.com/endpoint?token={token}"
-    async with websockets.connect(ws_url) as ws:
-        await ws.send(json.dumps({"type": "subscribe", "topic": "/market/ticker:all", "privateChannel": False, "response": True}))
-        while True:
-            msg = json.loads(await ws.recv())
-            if "data" in msg and "price" in msg["data"]:
-                yield "KuCoin", msg["data"]["symbol"].replace("-", ""), float(msg["data"]["price"])
-
-async def bybit_ws():
-    uri = "wss://stream.bybit.com/v5/public/spot"
-    async with websockets.connect(uri) as ws:
-        await ws.send(json.dumps({"op": "subscribe", "args": ["tickers"]}))
-        while True:
-            msg = json.loads(await ws.recv())
-            if "data" in msg:
-                for t in msg["data"]:
-                    yield "Bybit", t["symbol"], float(t["lastPrice"])
+        ws_url = f"wss://ws-api.kucoin.com/endpoint?token={token}"
+        async with s.ws_connect(ws_url) as ws:
+            await ws.send_json({"type": "subscribe", "topic": "/market/ticker:all"})
+            async for msg in ws:
+                d = json.loads(msg.data)
+                if "data" in d and "price" in d["data"]:
+                    yield "KUCOIN", d["data"]["symbol"].replace("-", ""), float(d["data"]["price"])
 
 async def htx_ws():
-    uri = "wss://api.huobi.pro/ws"
-    async with websockets.connect(uri) as ws:
-        sub = {"sub": "market.tickers", "id": "1"}
-        await ws.send(json.dumps(sub))
-        while True:
-            msg = json.loads(await ws.recv())
-            if "data" in msg:
-                for t in msg["data"]:
-                    yield "HTX", t["symbol"].upper(), float(t["close"])
+    url = "wss://api.huobi.pro/ws"
+    async with aiohttp.ClientSession() as session:
+        async with session.ws_connect(url) as ws:
+            await ws.send_json({"sub": "market.tickers"})
+            async for msg in ws:
+                d = json.loads(msg.data)
+                if "data" in d:
+                    for t in d["data"]:
+                        yield "HTX", t["symbol"].upper(), float(t["close"])
 
 async def gate_ws():
-    uri = "wss://api.gateio.ws/ws/v4/"
-    async with websockets.connect(uri) as ws:
-        await ws.send(json.dumps({"time": 1, "channel": "spot.tickers", "event": "subscribe"}))
-        while True:
-            msg = json.loads(await ws.recv())
-            if "result" in msg:
-                for t in msg["result"]:
-                    yield "Gate", t["currency_pair"].replace("_", ""), float(t["last"])
+    url = "wss://api.gateio.ws/ws/v4/"
+    async with aiohttp.ClientSession() as session:
+        async with session.ws_connect(url) as ws:
+            await ws.send_json({"channel": "spot.tickers", "event": "subscribe"})
+            async for msg in ws:
+                d = json.loads(msg.data)
+                if "result" in d:
+                    for t in d["result"]:
+                        yield "GATE", t["currency_pair"].replace("_", ""), float(t["last"])
 
 async def bitmart_ws():
-    uri = "wss://ws-manager-compress.bitmart.com/api?protocol=1.1"
-    async with websockets.connect(uri) as ws:
-        await ws.send(json.dumps({"op": "subscribe", "args": ["spot/ticker"]}))
-        while True:
-            msg = json.loads(await ws.recv())
-            if "data" in msg:
-                for t in msg["data"]:
-                    yield "BitMart", t["symbol"].replace("_", ""), float(t["last_price"])
+    url = "wss://ws-manager-compress.bitmart.com/api?protocol=1.1"
+    async with aiohttp.ClientSession() as session:
+        async with session.ws_connect(url) as ws:
+            await ws.send_json({"op": "subscribe", "args": ["spot/ticker"]})
+            async for msg in ws:
+                d = json.loads(msg.data)
+                if "data" in d:
+                    for t in d["data"]:
+                        yield "BITMART", t["symbol"].replace("_", ""), float(t["last_price"])
 
-# -------------------- ALERT ENGINE --------------------
+# ---------------- ALERT ENGINE ----------------
 
-async def price_engine(app):
+async def monitor(app):
     streams = [
-        binance_ws(),
-        kucoin_ws(),
-        bybit_ws(),
-        htx_ws(),
-        gate_ws(),
-        bitmart_ws()
+        binance_ws(), bybit_ws(), kucoin_ws(),
+        htx_ws(), gate_ws(), bitmart_ws()
     ]
-    async for exchange, symbol, price in merge_streams(streams):
-        for user_id, user_alerts in alerts.items():
-            for a in user_alerts:
-                if a["exchange"] == exchange and a["symbol"] == symbol:
-                    if (a["condition"] == "ABOVE" and price >= a["price"]) or \
-                       (a["condition"] == "BELOW" and price <= a["price"]):
-                        await app.bot.send_message(
-                            chat_id=user_id,
-                            text=f"🚨 ALERT!\n{exchange} {symbol}\nPrice: {price}\nCondition: {a['condition']} {a['price']}"
-                        )
-
-async def merge_streams(streams):
     tasks = [asyncio.create_task(s.__anext__()) for s in streams]
-    while True:
-        done, tasks = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-        for d in done:
-            result = d.result()
-            yield result
-            tasks.add(asyncio.create_task(streams[tasks.index(d)].__anext__()))
 
-# -------------------- MAIN --------------------
+    while True:
+        done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        for t in done:
+            try:
+                ex, sym, price = t.result()
+                for uid, al in alerts.items():
+                    for a in al:
+                        if a["exchange"] == ex and a["symbol"] == sym:
+                            if (a["condition"] == "ABOVE" and price >= a["price"]) or \
+                               (a["condition"] == "BELOW" and price <= a["price"]):
+                                await app.bot.send_message(uid, f"🚨 {ex} {sym}\nPrice: {price}")
+            except:
+                pass
+        tasks = [asyncio.create_task(s.__anext__()) for s in streams]
+
+# ---------------- MAIN ----------------
 
 async def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(handle_buttons))
+    app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
-    asyncio.create_task(price_engine(app))
+    asyncio.create_task(monitor(app))
     await app.run_polling()
 
 if __name__ == "__main__":
