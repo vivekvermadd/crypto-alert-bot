@@ -145,9 +145,9 @@ async def start(message: types.Message):
 
 @dp.callback_query(lambda c: c.data == "test_price")
 async def test_price(callback: CallbackQuery):
-    text = "🧪 **LIVE PRICES (BTC/USDT):**\n\n"
+    text = "🧪 **LIVE PRICES (BTCUSDT):**\n\n"
     for ex in EXCHANGES:
-        price = await get_price(ex, 'BTC/USDT')
+        price = await get_price(ex, 'BTCUSDT')
         status = f"`{ex.upper()}`: **${price:,.2f}**" if price else f"`{ex.upper()}`: ❌"
         text += status + "\n"
     await callback.message.edit_text(text, parse_mode="Markdown")
@@ -176,7 +176,7 @@ async def set_exchange(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text(
         f"✅ **{ex.upper()} selected**\n\n"
         f"💱 **Enter symbol:**\n"
-        f"`BTC/USDT`", parse_mode="Markdown")
+        f"`BTCUSDT`", parse_mode="Markdown")
     await state.set_state(AlertForm.symbol)
     await callback.answer()
 
