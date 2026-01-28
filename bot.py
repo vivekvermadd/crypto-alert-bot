@@ -19,10 +19,10 @@ dp = Dispatcher(storage=MemoryStorage())
 
 # CoinGecko maps your exchange/symbols
 COINGECKO_MAP = {
-    'BTC/USDT': 'bitcoin',
-    'ETH/USDT': 'ethereum', 
-    'SOL/USDT': 'solana',
-    'ADA/USDT': 'cardano'
+    'BTCUSDT': 'bitcoin',
+    'ETHUSDT': 'ethereum', 
+    'SOLUSDT': 'solana',
+    'ADAUSDT': 'cardano'
 }
 
 conn = sqlite3.connect('alerts.db', check_same_thread=False)
@@ -97,13 +97,13 @@ async def start(message: types.Message):
         [InlineKeyboardButton(text="📋 My Alerts", callback_data="list_alerts")]
     ]
     reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
-    await message.reply("🚀 **Crypto Alert Bot**\n\n✅ CoinGecko (All exchanges)\n⏰ 3s live checks\n🚨 Instant alerts\n\nPopular: BTC/USDT ETH/USDT SOL/USDT", 
+    await message.reply("🚀 **Crypto Alert Bot**\n\n✅ CoinGecko (All exchanges)\n⏰ 3s live checks\n🚨 Instant alerts\n\nPopular: BTCUSDT ETHUSDT SOLUSDT", 
                        reply_markup=reply_markup, parse_mode="Markdown")
 
 @dp.callback_query(lambda c: c.data == "test_price")
 async def test_price(callback: CallbackQuery):
     prices = {}
-    for sym in ['BTC/USDT', 'ETH/USDT', 'SOL/USDT']:
+    for sym in ['BTCUSDT', 'ETHUSDT', 'SOLUSDT']:
         price = await get_coingecko_price(sym)
         prices[sym] = price
     
@@ -118,7 +118,7 @@ async def test_price(callback: CallbackQuery):
 async def set_alert(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text(
         "💱 **Enter symbol:**\n\n"
-        "`BTC/USDT` `ETH/USDT` `SOL/USDT`", parse_mode="Markdown")
+        "`BTCUSDT` `ETHUSDT` `SOLUSDT`", parse_mode="Markdown")
     await state.set_state(AlertForm.symbol)
     await callback.answer()
 
@@ -126,7 +126,7 @@ async def set_alert(callback: CallbackQuery, state: FSMContext):
 async def set_symbol(message: types.Message, state: FSMContext):
     symbol = message.text.strip().upper()
     if symbol not in COINGECKO_MAP:
-        await message.reply("❌ Use: `BTC/USDT` `ETH/USDT` `SOL/USDT`", parse_mode="Markdown")
+        await message.reply("❌ Use: `BTCUSDT` `ETHUSDT` `SOLUSDT`", parse_mode="Markdown")
         return
     await state.update_data(symbol=symbol)
     await message.reply("💰 **Enter limit price:**\n\n`95000`", parse_mode="Markdown")
@@ -205,3 +205,4 @@ async def main():
 
 if __name__ == '__main__':
     asyncio.run(main())
+
