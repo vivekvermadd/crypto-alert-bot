@@ -25,7 +25,7 @@ cursor.execute('''CREATE TABLE IF NOT EXISTS alerts
                   (user_id INTEGER, alert_id TEXT PRIMARY KEY, data TEXT, muted BOOLEAN DEFAULT 0)''')
 conn.commit()
 
-alerts = defaultdict(dict)  # {user_id: {alert_id: {'exchange', 'symbol', 'limit', 'direction', 'muted':False}}}
+alerts = defaultdict(dict)
 
 class AlertForm(StatesGroup):
     exchange = State()
@@ -47,16 +47,64 @@ async def save_alert(user_id, alert_id, alert):
     conn.commit()
 
 async def get_price(exchange, symbol):
+    """ALL 6 EXCHANGES - Working endpoints"""
     try:
         async with aiohttp.ClientSession() as session:
+            # BINANCE
             if exchange == 'binance':
                 url = f"https://api.binance.com/api/v3/ticker/price?symbol={symbol.replace('/','')}"
                 async with session.get(url) as resp:
                     if resp.status == 200:
                         data = await resp.json()
                         return float(data['price'])
-            # Add other exchanges as needed
-    except:
+            
+            # BYBIT
+            elif exchange == 'bybit':
+                url = f"https://api.bybit.com/v5/market/tickers?category=spot&symbol={symbol.replace('/','')}"
+                async with session.get(url) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        if data.get('retCode') == 0 and data['result']['list']:
+                            return float(data['result']['list'][0]['lastPrice'])
+            
+            # HTX (Huobi)
+            elif exchange == 'htx':
+                url = f"https://api.huobi.pro/market/detail/merged?symbol={symbol.lower().replace('/','')}"
+                async with session.get(url) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        if 'tick' in data:
+                            return float(data['tick']['close'])
+            
+            # KUCOIN
+            elif exchange == 'kucoin':
+                url = f"https://api.kucoin.com/api/v1/market/orderbook/level1?symbol={symbol.replace('/','-')}"
+                async with session.get(url) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        if data.get('code') == '200000':
+                            return float(data['data']['price'])
+            
+            # GATEIO
+            elif exchange == 'gateio':
+                url = f"https://api.gateio.ws/api/v4/spot/tickers?currency_pair={symbol.replace('/','_')}"
+                async with session.get(url) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        for ticker in data:
+                            if ticker['currency_pair'] == symbol.replace('/','_'):
+                                return float(ticker['last'])
+            
+            # BITMART
+            elif exchange == 'bitmart':
+                url = f"https://api-cloud.bitmart.com/spot/v1/ticker?symbol={symbol.replace('/','_')}"
+                async with session.get(url) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        if data.get('code') == '1000' and data['data']['tickers']:
+                            return float(data['data']['tickers'][0]['last_price'])
+    except Exception as e:
+        logging.error(f"❌ {exchange} error: {e}")
         return None
 
 async def price_monitor():
@@ -64,9 +112,9 @@ async def price_monitor():
         print(f"🔄 Checking {sum(len(a) for a in alerts.values())} alerts")
         for user_id, user_alerts in list(alerts.items()):
             for alert_id, alert in list(user_alerts.items()):
-                if alert.get('muted', False):  # Skip muted alerts
+                if alert.get('muted', False):
                     continue
-                    
+                
                 price = await get_price(alert['exchange'], alert['symbol'])
                 print(f"📊 {alert['exchange'].upper()} {alert['symbol']}: ${price} vs {alert['limit']}")
                 
@@ -74,7 +122,6 @@ async def price_monitor():
                     direction = alert['direction']
                     limit = alert['limit']
                     if (direction == 'above' and price >= limit) or (direction == 'below' and price <= limit):
-                        # SEND REPEATED ALERT (until STOP clicked)
                         await bot.send_message(
                             user_id,
                             f"🚨 **ALERT ACTIVE!**\n\n"
@@ -82,33 +129,46 @@ async def price_monitor():
                             f"💱 `{alert['symbol']}`\n"
                             f"💰 **${price:,.2f}**\n"
                             f"🎯 **{direction.upper()} ${limit:,.2f}**\n\n"
-                            f"👆 *Click STOP to silence*",
+                            f"👆 *Click STOP to silence notifications*",
                             parse_mode="Markdown",
                             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                                 [InlineKeyboardButton(text="🛑 STOP ALERT", callback_data=f"stop_{alert_id}")]
                             ])
                         )
                         print(f"🚨 Alert sent for {alert_id}")
-        await asyncio.sleep(5)  # 5s checks
+        await asyncio.sleep(5)
 
 @dp.message(Command('start'))
 async def start(message: types.Message):
     keyboard = [
         [InlineKeyboardButton(text="➕ Set Alert", callback_data="set_alert")],
+        [InlineKeyboardButton(text="🧪 Test Prices", callback_data="test_price")],
         [InlineKeyboardButton(text="📋 My Alerts", callback_data="list_alerts")]
     ]
     reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
-    await message.reply("🚀 **Alert Bot** - Persistent alerts\n\n"
-                       "✅ Set once → Alert until STOP\n"
-                       "✅ Background monitoring always active\n"
-                       "👆 STOP button silences notifications", 
+    await message.reply("🚀 **Crypto Alert Bot**\n\n"
+                       "✅ All 6 exchanges\n"
+                       "🔔 Persistent alerts until STOP\n"
+                       "⏰ 5s live checks\n\n"
+                       f"💱 Use: `BTC/USDT`", 
                        reply_markup=reply_markup, parse_mode="Markdown")
+
+@dp.callback_query(lambda c: c.data == "test_price")
+async def test_price(callback: CallbackQuery):
+    text = "🧪 **LIVE PRICES** (BTC/USDT):\n\n"
+    for ex in EXCHANGES:
+        price = await get_price(ex, 'BTC/USDT')
+        status = f"`{ex.upper()}`: **${price:,.2f}**" if price else f"`{ex.upper()}`: ❌"
+        text += status + "\n"
+    await callback.message.edit_text(text, parse_mode="Markdown")
+    await callback.answer()
 
 @dp.callback_query(lambda c: c.data == "set_alert")
 async def set_alert_start(callback: CallbackQuery, state: FSMContext):
     keyboard = [
-        [InlineKeyboardButton(text="BINANCE", callback_data="ex_binance")],
-        [InlineKeyboardButton(text="BYBIT", callback_data="ex_bybit")],
+        [InlineKeyboardButton(text="BINANCE", callback_data="ex_binance"), InlineKeyboardButton(text="BYBIT", callback_data="ex_bybit")],
+        [InlineKeyboardButton(text="HTX", callback_data="ex_htx"), InlineKeyboardButton(text="KUCOIN", callback_data="ex_kucoin")],
+        [InlineKeyboardButton(text="GATEIO", callback_data="ex_gateio"), InlineKeyboardButton(text="BITMART", callback_data="ex_bitmart")],
         [InlineKeyboardButton(text="❌ Cancel", callback_data="cancel")]
     ]
     reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
@@ -120,14 +180,18 @@ async def set_alert_start(callback: CallbackQuery, state: FSMContext):
 async def set_exchange(callback: CallbackQuery, state: FSMContext):
     ex = callback.data.split('_')[1]
     await state.update_data(exchange=ex)
-    await callback.message.edit_text(f"✅ **{ex.upper()}**\n\n💱 Enter: `BTC/USDT`", parse_mode="Markdown")
+    await callback.message.edit_text(
+        f"✅ **{ex.upper()} selected**\n\n"
+        f"💱 **Enter symbol:**\n"
+        f"`BTC/USDT`", parse_mode="Markdown")
     await state.set_state(AlertForm.symbol)
     await callback.answer()
 
 @dp.message(AlertForm.symbol)
 async def set_symbol(message: types.Message, state: FSMContext):
-    await state.update_data(symbol=message.text.strip().upper())
-    await message.reply("💰 **Enter limit:**\n`90000`", parse_mode="Markdown")
+    symbol = message.text.strip().upper()
+    await state.update_data(symbol=symbol)
+    await message.reply("💰 **Enter limit price:**\n\n`90000`", parse_mode="Markdown")
     await state.set_state(AlertForm.limit)
 
 @dp.message(AlertForm.limit)
@@ -140,10 +204,10 @@ async def set_limit(message: types.Message, state: FSMContext):
             [InlineKeyboardButton(text="📉 BELOW", callback_data="dir_below")]
         ]
         reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
-        await message.reply("🎯 **Direction:**", reply_markup=reply_markup, parse_mode="Markdown")
+        await message.reply("🎯 **Select direction:**", reply_markup=reply_markup, parse_mode="Markdown")
         await state.set_state(AlertForm.direction)
     except:
-        await message.reply("❌ Enter number: `90000`", parse_mode="Markdown")
+        await message.reply("❌ **Invalid price.** Enter: `90000`", parse_mode="Markdown")
 
 @dp.callback_query(AlertForm.direction)
 async def set_dir(callback: CallbackQuery, state: FSMContext):
@@ -156,25 +220,25 @@ async def set_dir(callback: CallbackQuery, state: FSMContext):
         'symbol': data['symbol'], 
         'limit': data['limit'], 
         'direction': direction,
-        'muted': False  # Start unmuted
+        'muted': False
     }
     alerts[user_id][alert_id] = alert
     await save_alert(user_id, alert_id, alert)
     
-    keyboard = [[InlineKeyboardButton(text="📋 List Alerts", callback_data="list_alerts")]]
+    keyboard = [[InlineKeyboardButton(text="📋 My Alerts", callback_data="list_alerts")]]
     reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
     await callback.message.edit_text(
-        f"✅ **ALERT LIVE!**\n\n"
+        f"✅ **ALERT CREATED!**\n\n"
         f"📊 `{data['exchange'].upper()}`\n"
         f"💱 `{data['symbol']}`\n"
         f"🎯 `{direction.upper()} ${data['limit']:,.2f}`\n\n"
-        f"🔄 *Persistent - alerts until STOP*", 
+        f"🔔 *Will alert every 5s until STOP*\n"
+        f"⏰ *Background monitoring active*", 
         reply_markup=reply_markup, parse_mode="Markdown"
     )
     await state.clear()
     await callback.answer()
 
-# 🚨 NEW: STOP BUTTON HANDLER
 @dp.callback_query(lambda c: c.data.startswith("stop_"))
 async def stop_alert(callback: CallbackQuery):
     alert_id = callback.data.split("_")[1]
@@ -188,16 +252,15 @@ async def stop_alert(callback: CallbackQuery):
             f"📊 `{alerts[user_id][alert_id]['exchange'].upper()}`\n"
             f"💱 `{alerts[user_id][alert_id]['symbol']}`\n"
             f"🎯 `{alerts[user_id][alert_id]['direction'].upper()} ${alerts[user_id][alert_id]['limit']:,.2f}`\n\n"
-            f"✅ *Still monitoring in background*\n"
-            f"👆 *Click RESUME to restart notifications*",
+            f"✅ *Background monitoring continues*\n"
+            f"👆 *Click RESUME for notifications*",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="🔄 RESUME", callback_data=f"resume_{alert_id}")]
             ]),
             parse_mode="Markdown"
         )
-    await callback.answer("🛑 Alert silenced!")
+    await callback.answer("🛑 Notifications stopped!")
 
-# 🔄 NEW: RESUME BUTTON HANDLER  
 @dp.callback_query(lambda c: c.data.startswith("resume_"))
 async def resume_alert(callback: CallbackQuery):
     alert_id = callback.data.split("_")[1]
@@ -207,28 +270,28 @@ async def resume_alert(callback: CallbackQuery):
         alerts[user_id][alert_id]['muted'] = False
         await save_alert(user_id, alert_id, alerts[user_id][alert_id])
         await callback.message.edit_text(
-            f"🔄 **ALERT RESUMED!**\n\n"
+            f"🔄 **ALERT RESUMED**\n\n"
             f"📊 `{alerts[user_id][alert_id]['exchange'].upper()}`\n"
             f"💱 `{alerts[user_id][alert_id]['symbol']}`\n"
             f"🎯 `{alerts[user_id][alert_id]['direction'].upper()} ${alerts[user_id][alert_id]['limit']:,.2f}`\n\n"
-            f"🚨 *Notifications active*",
+            f"🚨 *Notifications restarted*",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🛑 STOP AGAIN", callback_data=f"stop_{alert_id}")]
+                [InlineKeyboardButton(text="🛑 STOP", callback_data=f"stop_{alert_id}")]
             ]),
             parse_mode="Markdown"
         )
-    await callback.answer("🔄 Notifications resumed!")
+    await callback.answer("🔄 Notifications active!")
 
 @dp.callback_query(lambda c: c.data == "list_alerts")
 async def list_alerts(callback: CallbackQuery):
     user_id = callback.from_user.id
     if not alerts[user_id]:
-        await callback.answer("No alerts")
+        await callback.answer("No alerts active")
         return
     text = "📊 **YOUR ALERTS:**\n\n"
     for aid, a in alerts[user_id].items():
         status = "🔇 MUTED" if a.get('muted', False) else "🔔 ACTIVE"
-        text += f"• `{a['exchange'].upper()}` `{a['symbol']}` `{a['direction'].upper()} ${a['limit']:,.2f}` {status}\n"
+        text += f"• `{a['exchange'].upper()}` `{a['symbol']}` `{a['direction'].upper()} ${a['limit']:,.2f}` `{status}`\n"
     keyboard = [[InlineKeyboardButton(text="🗑️ Clear All", callback_data="del_all")]]
     reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
     await callback.message.edit_text(text, reply_markup=reply_markup, parse_mode="Markdown")
@@ -240,7 +303,7 @@ async def del_all(callback: CallbackQuery):
     alerts[user_id].clear()
     cursor.execute('DELETE FROM alerts WHERE user_id=?', (user_id,))
     conn.commit()
-    await callback.answer("🗑️ All cleared!")
+    await callback.answer("🗑️ All alerts deleted!")
 
 @dp.callback_query(lambda c: c.data == "cancel")
 async def cancel(callback: CallbackQuery, state: FSMContext):
@@ -251,7 +314,7 @@ async def cancel(callback: CallbackQuery, state: FSMContext):
 async def main():
     await load_alerts()
     asyncio.create_task(price_monitor())
-    print("🚀 PERSISTENT ALERT BOT STARTED")
+    print("🚀 ALL 6 EXCHANGES + PERSISTENT ALERT BOT STARTED")
     await dp.start_polling(bot)
 
 if __name__ == '__main__':
