@@ -111,7 +111,7 @@ async def set_alert_start(callback: CallbackQuery, state: FSMContext):
 async def set_exchange(callback: CallbackQuery, state: FSMContext):
     ex = callback.data.split('_')[1]
     await state.update_data(exchange=ex)
-    await callback.message.edit_text(f"✅ {ex.upper()}\n\nEnter symbol:\n`BTC/USDT` `ETH/USDT`", parse_mode="Markdown")
+    await callback.message.edit_text(f"✅ {ex.upper()}\n\nEnter symbol:\n`BTCUSDT` `ETHUSDT`", parse_mode="Markdown")
     await state.set_state(AlertForm.symbol)
     await callback.answer()
 
@@ -194,3 +194,4 @@ async def main():
 
 if __name__ == '__main__':
     asyncio.run(main())
+
