@@ -1,6 +1,2 @@
-python-telegram-bot[job-queue]==20.3
-aiohttp
-requests
-
-
-
+aiogram==3.13.1
+ccxt==4.3.0
