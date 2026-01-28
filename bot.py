@@ -12,7 +12,8 @@ import json
 from collections import defaultdict
 import sqlite3
 
-logging.basicConfig(level=logging.WARNING)
+logging.basicConfig(level=logging.INFO)
+
 BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
@@ -85,15 +86,23 @@ async def get_price(exchange, symbol):
         return None
 
 async def price_monitor():
-    """2s polling - DIRECT APIs"""
+    print("🔄 Starting price monitor...")  # DEBUG
+    loop_count = 0
     while True:
+        loop_count += 1
+        print(f"🔄 Monitor loop #{loop_count} - {len(alerts)} users, {sum(len(a) for a in alerts.values())} alerts")  # DEBUG
+        
         for user_id, user_alerts in list(alerts.items()):
             for alert_id, alert in list(user_alerts.items()):
+                print(f"📊 Checking {alert['exchange']} {alert['symbol']}...")  # DEBUG
                 price = await get_price(alert['exchange'], alert['symbol'])
+                print(f"💰 {alert['exchange']} {alert['symbol']} price={price} limit={alert['limit']} {alert['direction']}")  # DEBUG
+                
                 if price:
                     direction = alert['direction']
                     limit = alert['limit']
                     if (direction == 'above' and price >= limit) or (direction == 'below' and price <= limit):
+                        print(f"🚨 TRIGGERING ALERT for {user_id}!")  # DEBUG
                         await bot.send_message(
                             user_id,
                             f"🚨 **ALERT TRIGGERED!**\n\n"
@@ -103,11 +112,17 @@ async def price_monitor():
                             f"🎯 **{direction.upper()} ${limit:,.4f}**",
                             parse_mode="Markdown"
                         )
-                        # Remove one-time alert
                         del alerts[user_id][alert_id]
                         cursor.execute('DELETE FROM alerts WHERE user_id=? AND alert_id=?', (user_id, alert_id))
                         conn.commit()
-        await asyncio.sleep(2)
+                        print(f"✅ Alert deleted for {alert_id}")
+                    else:
+                        print(f"⏳ No trigger: {price} {'<=' if direction=='above' else '>='} {limit}")
+                else:
+                    print(f"❌ NO PRICE for {alert['exchange']}/{alert['symbol']}")
+        
+        print(f"😴 Sleeping 1s... Total alerts left: {sum(len(a) for a in alerts.values())}")
+        await asyncio.sleep(1)  # Slower for debug
 
 @dp.message(Command('start'))
 async def start(message: types.Message):
@@ -234,3 +249,4 @@ async def main():
 
 if __name__ == '__main__':
     asyncio.run(main())
+
