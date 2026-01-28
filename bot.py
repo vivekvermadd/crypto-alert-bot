@@ -28,6 +28,9 @@ conn.commit()
 alerts = defaultdict(dict)
 tasks = defaultdict(list)
 
+logging.getLogger('aiogram.event').setLevel(logging.WARNING)
+
+
 class AlertForm(StatesGroup):
     exchange = State()
     symbol = State()
@@ -210,3 +213,4 @@ async def main():
 
 if __name__ == '__main__':
     asyncio.run(main())
+
